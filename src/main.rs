@@ -109,8 +109,8 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                         }
                     };
                     
-                    println!("DEBUG: Found route - path: {}, method: {}, handler: {}, module: {:?}", 
-                             full_path, method, handler, current_module);
+                    //println!("DEBUG: Found route - path: {}, method: {}, handler: {}, module: {:?}", 
+                    //          full_path, method, handler, current_module);
                     
                     self.routes.push(RouteInfo {
                         path: full_path,
@@ -127,7 +127,7 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                     parse_string_arg(&call.args[0]),
                     parse_nest_handler(&call.args[1]),
                 ) {
-                    println!("DEBUG: Found nest - base_path: {}, module: {}", base_path, module_name);
+                    //println!("DEBUG: Found nest - base_path: {}, module: {}", base_path, module_name);
                     
                     // 获取当前状态
                     let current_base_path = self.state_stack.last()
@@ -141,7 +141,7 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                         format!("{}{}", current_base_path, base_path)
                     };
                     
-                    println!("DEBUG: Pushing state - base_path: {}, module: {}", new_base_path, module_name);
+                    //println!("DEBUG: Pushing state - base_path: {}, module: {}", new_base_path, module_name);
                     
                     // 将新状态压入栈
                     self.state_stack.push((new_base_path, Some(module_name.clone())));
@@ -247,7 +247,7 @@ fn parse_handler(file_content: &str, handler_name: &str) -> Option<HandlerInfo> 
                     if attr.path().is_ident("doc") {
                         // 将属性转换为字符串并解析
                         let attr_str = attr.to_token_stream().to_string();
-                        println!("DEBUG: Found doc attr: {}", attr_str);
+                        //println!("DEBUG: Found doc attr: {}", attr_str);
                         if attr_str.starts_with("#[doc = ") {
                             // 提取引号内的内容
                             if let Some(start) = attr_str.find('"') {
@@ -256,7 +256,7 @@ fn parse_handler(file_content: &str, handler_name: &str) -> Option<HandlerInfo> 
                                         let comment = &attr_str[start + 1..end];
                                         if !comment.is_empty() {
                                             doc_comments.push(comment.to_string());
-                                            println!("DEBUG: Extracted comment: {}", comment);
+                                            //println!("DEBUG: Extracted comment: {}", comment);
                                         }
                                     }
                                 }
@@ -268,7 +268,7 @@ fn parse_handler(file_content: &str, handler_name: &str) -> Option<HandlerInfo> 
                 // 合并文档注释
                 if !doc_comments.is_empty() {
                     handler_info.description = Some(doc_comments.join("\n"));
-                    println!("DEBUG: Final description: {}", handler_info.description.as_ref().unwrap());
+                    //println!("DEBUG: Final description: {}", handler_info.description.as_ref().unwrap());
                 }
 
                 // 提取参数
@@ -279,7 +279,7 @@ fn parse_handler(file_content: &str, handler_name: &str) -> Option<HandlerInfo> 
                             Pat::Ident(_) => {
                                 // 简单标识符模式，如 Json(payload)
                                 if let Some((kind, inner_type)) = parse_extractor_type(&pat_type.ty) {
-                                    println!("DEBUG: Found extractor - kind: {}, type: {}", kind, inner_type.to_token_stream());
+                                    //println!("DEBUG: Found extractor - kind: {}, type: {}", kind, inner_type.to_token_stream());
                                     handler_info.params.push(Extractor {
                                         kind: kind.to_string(),
                                         inner_type,
@@ -289,7 +289,7 @@ fn parse_handler(file_content: &str, handler_name: &str) -> Option<HandlerInfo> 
                             Pat::Struct(_pat_struct) => {
                                 // 结构体模式，如 Path { id }
                                 if let Some((kind, inner_type)) = parse_extractor_type(&pat_type.ty) {
-                                    println!("DEBUG: Found extractor (struct) - kind: {}, type: {}", kind, inner_type.to_token_stream());
+                                    //println!("DEBUG: Found extractor (struct) - kind: {}, type: {}", kind, inner_type.to_token_stream());
                                     handler_info.params.push(Extractor {
                                         kind: kind.to_string(),
                                         inner_type,
@@ -299,7 +299,7 @@ fn parse_handler(file_content: &str, handler_name: &str) -> Option<HandlerInfo> 
                             Pat::TupleStruct(_pat_tuple) => {
                                 // 元组结构体模式，如 Path(id)
                                 if let Some((kind, inner_type)) = parse_extractor_type(&pat_type.ty) {
-                                    println!("DEBUG: Found extractor (tuple) - kind: {}, type: {}", kind, inner_type.to_token_stream());
+                                    //println!("DEBUG: Found extractor (tuple) - kind: {}, type: {}", kind, inner_type.to_token_stream());
                                     handler_info.params.push(Extractor {
                                         kind: kind.to_string(),
                                         inner_type,
@@ -309,7 +309,7 @@ fn parse_handler(file_content: &str, handler_name: &str) -> Option<HandlerInfo> 
                             _ => {
                                 // 其他模式，尝试解析类型
                                 if let Some((kind, inner_type)) = parse_extractor_type(&pat_type.ty) {
-                                    println!("DEBUG: Found extractor (other) - kind: {}, type: {}", kind, inner_type.to_token_stream());
+                                    //println!("DEBUG: Found extractor (other) - kind: {}, type: {}", kind, inner_type.to_token_stream());
                                     handler_info.params.push(Extractor {
                                         kind: kind.to_string(),
                                         inner_type,
@@ -454,6 +454,7 @@ fn generate_openapi(
 
     // 生成路径定义
     for route in routes {
+        println!("check route: {}", route.path);
         if let Some(handler) = handlers.get(&route.handler) {
             let mut parameters = vec![];
             let mut request_body = None;
@@ -602,6 +603,8 @@ fn generate_openapi(
                 route.method.to_lowercase(),
                 operation,
             );
+        }else{
+            println!("router:{} not found handler:{}", route.path, route.handler);
         }
     }
 
@@ -773,6 +776,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for route in &visitor.routes {
         // 首先尝试从主handler文件中解析
         if let Some(handler) = parse_handler(&router_content, &route.handler) {
+            println!("ADD Handler:{}", route.path);
             handlers.insert(route.handler.clone(), handler);
         } else if let Some(module_name) = &route.module {
             // 如果主文件中没找到，尝试从模块文件中解析
@@ -814,6 +818,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 4. 生成OpenAPI
+    // println!("routes:{:?}", visitor.routes);
+    // for (key, info) in handlers.iter() {
+    //     println!("|-> handler:{}", key);
+    // }
+    // println!("{} handlers", handlers.len());
     let openapi = generate_openapi(&visitor.routes, &handlers, &all_models);
     let pretty_json = serde_json::to_string_pretty(&openapi)?;
     
