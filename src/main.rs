@@ -629,7 +629,21 @@ fn rust_type_to_openapi(ty: &str, models: &HashMap<String, StructInfo>) -> Value
             if let Some(model) = models.get(clean_ty) {
                 json!({"$ref": format!("#/components/schemas/{}", model.name)})
             } else {
-                eprintln!("Warning: Unknown type '{}', defaulting to object", clean_ty);
+                // Provide helpful suggestions for common type errors
+                let clean_type_no_spaces = clean_ty.replace(" ", "");
+                let suggestion = if clean_type_no_spaces.starts_with("Json<") {
+                    format!("Note: Json<T> extractors are not fully supported yet. Consider defining the response type in --model-files")
+                } else if clean_ty.contains("::") {
+                    format!("Note: Type path '{}' may need to be added to model files", clean_ty)
+                } else {
+                    String::new()
+                };
+
+                if !suggestion.is_empty() {
+                    eprintln!("Warning: Unknown type '{}', defaulting to object. {}", clean_ty, suggestion);
+                } else {
+                    eprintln!("Warning: Unknown type '{}', defaulting to object", clean_ty);
+                }
                 json!({"type": "object"})
             }
         }
@@ -975,7 +989,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     
     if model_files.is_empty() {
-        eprintln!("Warning: No model files specified");
+        eprintln!("Warning: No model files specified. Response/request schemas will be generic. Use --model-files to specify model definitions for accurate API documentation.");
     }
     
     // 构建模型文件路径
@@ -1060,7 +1074,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             all_models.extend(models);
             println!("Parsed models from: {}", path.display());
         } else {
-            eprintln!("Warning: Model file not found: {}", path.display());
+            eprintln!("Warning: Model file not found: {}. Use --model-files to specify correct paths, or skip if models are defined inline in handlers.", path.display());
         }
     }
 
