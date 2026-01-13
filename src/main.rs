@@ -1546,4 +1546,99 @@ mod tests {
             assert_eq!(doc_comments[0], "Single line comment");
         }
     }
+
+    // P0-2: Reference type mapping tests
+    #[test]
+    fn test_rust_type_to_openapi_reference_types() {
+        let models = HashMap::new();
+
+        // Test &'static str
+        let schema = rust_type_to_openapi("&'static str", &models);
+        assert_eq!(schema["type"], "string");
+
+        // Test &str
+        let schema = rust_type_to_openapi("&str", &models);
+        assert_eq!(schema["type"], "string");
+
+        // Test &String
+        let schema = rust_type_to_openapi("&String", &models);
+        assert_eq!(schema["type"], "string");
+
+        // Test & 'static str (with space)
+        let schema = rust_type_to_openapi("& 'static str", &models);
+        assert_eq!(schema["type"], "string");
+    }
+
+    // P1-2: Helper function tests
+    #[test]
+    fn test_extract_path_params_colon_style() {
+        let params = extract_path_params("/users/:id");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0]["name"], "id");
+        assert_eq!(params[0]["in"], "path");
+        assert_eq!(params[0]["required"], true);
+    }
+
+    #[test]
+    fn test_extract_path_params_brace_style() {
+        let params = extract_path_params("/users/{id}");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0]["name"], "id");
+        assert_eq!(params[0]["in"], "path");
+        assert_eq!(params[0]["required"], true);
+    }
+
+    #[test]
+    fn test_extract_path_params_multiple() {
+        let params = extract_path_params("/users/:user_id/posts/:post_id");
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0]["name"], "user_id");
+        assert_eq!(params[1]["name"], "post_id");
+    }
+
+    #[test]
+    fn test_extract_path_params_mixed_styles() {
+        let params = extract_path_params("/users/:id/posts/{post_id}");
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_path_params_none() {
+        let params = extract_path_params("/users/all");
+        assert_eq!(params.len(), 0);
+    }
+
+    #[test]
+    fn test_generate_schemas_empty() {
+        let models = HashMap::new();
+        let schemas = generate_schemas(&models);
+        assert_eq!(schemas.as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_generate_schemas_single_struct() {
+        let mut models = HashMap::new();
+        models.insert("User".to_string(), StructInfo {
+            name: "User".to_string(),
+            fields: vec![
+                FieldInfo {
+                    name: "id".to_string(),
+                    ty: "String".to_string(),
+                },
+                FieldInfo {
+                    name: "age".to_string(),
+                    ty: "i32".to_string(),
+                },
+            ],
+        });
+
+        let schemas = generate_schemas(&models);
+        assert!(schemas.as_object().unwrap().contains_key("User"));
+
+        let user_schema = &schemas["User"];
+        assert_eq!(user_schema["type"], "object");
+        assert!(user_schema["properties"].is_object());
+        assert_eq!(user_schema["properties"]["id"]["type"], "string");
+        assert_eq!(user_schema["properties"]["age"]["type"], "integer");
+    }
 }
