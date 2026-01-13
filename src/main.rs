@@ -130,8 +130,28 @@ impl RouterVisitor {
                             if let syn::Item::Fn(func) = item {
                                 if func.sig.ident == "router" {
                                     if let Some(syn::Stmt::Expr(expr, _)) = func.block.stmts.last() {
-                                        self.visit_expr(expr);
-                                        found = true;
+                                        // Check if this is a router() call like handler::router()
+                                        if let Some(target_module) = extract_router_module_call(expr) {
+                                            // Calculate the target module path
+                                            let target_module_path = {
+                                                let mut path = self.current_module.clone();
+                                                path.push(target_module.clone());
+                                                path.join("/")
+                                            };
+
+                                            // Recursively visit the target module
+                                            if self.visit_module_router(&target_module, &target_module_path) {
+                                                found = true;
+                                            } else {
+                                                // If recursive visit failed, fall back to visiting the expression
+                                                self.visit_expr(expr);
+                                                found = true;
+                                            }
+                                        } else {
+                                            // Not a recursive router call, visit normally
+                                            self.visit_expr(expr);
+                                            found = true;
+                                        }
                                     }
                                 }
                             }
@@ -205,11 +225,36 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                         .map(|(bp, _)| bp.clone())
                         .unwrap_or_default();
 
-                    // 计算新的基础路径
+                    // 计算新的基础路径，检测并避免重复前缀
                     let new_base_path = if current_base_path.is_empty() {
+                        // 没有当前路径，直接使用新前缀
                         path_prefix.clone()
+                    } else if current_base_path == path_prefix {
+                        // 完全相同的路径，不重复添加
+                        current_base_path.clone()
+                    } else if path_prefix.starts_with(&current_base_path) {
+                        // 新前缀包含当前路径（例如：current="/api", new="/api/v1"）
+                        // 使用更完整的新前缀
+                        path_prefix.clone()
+                    } else if current_base_path.ends_with(&path_prefix) {
+                        // 当前路径已经包含新前缀（例如：current="/api/v1", new="/v1"）
+                        // 保持当前路径不变
+                        current_base_path.clone()
                     } else {
-                        format!("{}{}", current_base_path, path_prefix)
+                        // 检查是否有部分重叠
+                        let combined = format!("{}{}", current_base_path, path_prefix);
+                        let current_end = current_base_path.split('/').last().unwrap_or("");
+                        let new_start = path_prefix.trim_start_matches('/').split('/').next().unwrap_or("");
+
+                        if current_end == new_start && !current_end.is_empty() && !new_start.is_empty() {
+                            // 有重叠，去掉重复部分
+                            // 例如："/api/v1" + "/v1/user" -> "/api/v1/user"
+                            let trimmed = current_base_path.trim_end_matches(current_end).trim_end_matches('/');
+                            format!("{}/{}", trimmed, path_prefix.trim_start_matches('/'))
+                        } else {
+                            // 没有重叠，正常拼接
+                            combined
+                        }
                     };
 
                     // 将新状态压入栈
@@ -230,8 +275,6 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                 // 处理 .merge() 调用
                 // merge() 不添加路径前缀，只是合并另一个路由
                 if let Some(module_name) = parse_merge_handler(&call.args[0]) {
-                    //println!("DEBUG: Found merge - module: {}", module_name);
-
                     // 获取当前状态（merge 不改变路径前缀）
                     let (current_base_path, current_module) = self.state_stack.last()
                         .map(|(bp, m)| (bp.clone(), m.clone()))
@@ -330,6 +373,33 @@ fn parse_merge_handler(expr: &syn::Expr) -> Option<String> {
     if let syn::Expr::Path(path) = expr {
         if let Some(segment) = path.path.segments.first() {
             return Some(segment.ident.to_string());
+        }
+    }
+
+    None
+}
+
+/// Extract the target module name from a router() call expression.
+/// For example, `handler::router()` returns Some("handler").
+/// Returns None if the expression is not a router() call.
+fn extract_router_module_call(expr: &syn::Expr) -> Option<String> {
+    if let syn::Expr::Call(call) = expr {
+        if let syn::Expr::Path(path) = &*call.func {
+            // Get the last segment as the function name
+            if let Some(last_segment) = path.path.segments.last() {
+                let func_name = last_segment.ident.to_string();
+
+                // Check if this is a router() function
+                if func_name.contains("router") {
+                    // Extract the module name from the path
+                    // For "handler::router()", we want "handler"
+                    if path.path.segments.len() > 1 {
+                        if let Some(segment) = path.path.segments.first() {
+                            return Some(segment.ident.to_string());
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -573,7 +643,7 @@ fn rust_type_to_openapi(ty: &str, models: &HashMap<String, StructInfo>) -> Value
         let inner_end = clean_ty.rfind('>').unwrap_or(clean_ty.len());
         let inner_type = &clean_ty[inner_start + 1..inner_end];
 
-        match outer_type {
+        match outer_type.trim() {
             "Vec" | "std::vec::Vec" => {
                 return json!({
                     "type": "array",
@@ -1489,6 +1559,45 @@ mod tests {
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["additionalProperties"]["type"], "array");
         assert_eq!(schema["additionalProperties"]["items"]["type"], "integer");
+    }
+
+    #[test]
+    fn test_generic_types_with_spaces() {
+        let models = HashMap::new();
+
+        // Test Vec<String> with spaces (real-world case from syn::to_token_stream())
+        let schema = rust_type_to_openapi("Vec < String >", &models);
+        assert_eq!(schema["type"], "array", "Vec with spaces should be array");
+        assert_eq!(schema["items"]["type"], "string");
+
+        // Test Option<i64> with spaces
+        let schema = rust_type_to_openapi("Option < i64 >", &models);
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["format"], "int64");
+        assert_eq!(schema["nullable"], true);
+
+        // Test HashMap<String, i32> with spaces
+        let schema = rust_type_to_openapi("HashMap < String , i32 >", &models);
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["additionalProperties"]["type"], "integer");
+    }
+
+    #[test]
+    fn test_generic_types_std_paths() {
+        let models = HashMap::new();
+
+        // Test std::vec::Vec<String>
+        let schema = rust_type_to_openapi("std::vec::Vec<String>", &models);
+        assert_eq!(schema["type"], "array");
+
+        // Test std::option::Option<i64>
+        let schema = rust_type_to_openapi("std::option::Option<i64>", &models);
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["nullable"], true);
+
+        // Test std::collections::HashMap<String, i32>
+        let schema = rust_type_to_openapi("std::collections::HashMap<String, i32>", &models);
+        assert_eq!(schema["type"], "object");
     }
 
     #[test]

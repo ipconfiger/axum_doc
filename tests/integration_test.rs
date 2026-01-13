@@ -476,3 +476,46 @@ fn test_components_schemas() {
         }
     }
 }
+
+#[test]
+fn test_duplicate_path_prefix_detection() {
+    // Test that duplicate path prefixes are properly deduplicated
+    // This fixture has:
+    // - modules/mod.rs: .nest("/api/v1/user", user::router())
+    // - modules/user/mod.rs: Router::new().nest("/api/v1/user", handler::router())
+    // Expected result: /api/v1/user/login (NOT /api/v1/user/api/v1/user/login)
+
+    let fixture_dir = PathBuf::from("tests/fixtures/dup_path_app");
+    let output_file = "/tmp/axum_doc_test_dup_path.json";
+
+    let output = Command::new("cargo")
+        .args(&[
+            "run", "--",
+            "--base-dir", fixture_dir.to_str().unwrap(),
+            "--handler-file", "src/main.rs",
+            "--output", output_file
+        ])
+        .output()
+        .expect("Failed to run axum_doc");
+
+    if !output.status.success() {
+        eprintln!("axum_doc stderr: {}", String::from_utf8_lossy(&output.stderr));
+        panic!("axum_doc failed for dup_path_app fixture");
+    }
+
+    let content = fs::read_to_string(output_file)
+        .expect("Failed to read output file");
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .expect("Output is not valid JSON");
+
+    let paths = json["paths"].as_object().unwrap();
+
+    // Verify the correct path exists
+    assert!(paths.contains_key("/api/v1/user/login"),
+            "Expected path '/api/v1/user/login' not found. Found paths: {:?}",
+            paths.keys().collect::<Vec<_>>());
+
+    // Verify the duplicate path does NOT exist
+    assert!(!paths.contains_key("/api/v1/user/api/v1/user/login"),
+            "Duplicate path '/api/v1/user/api/v1/user/login' should not exist");
+}
