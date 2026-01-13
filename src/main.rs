@@ -59,12 +59,12 @@ struct Args {
     output: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RouteInfo {
     path: String,
     method: String,
     handler: String,
-    module: Option<String>, // 模块名，用于分组
+    module: Option<Vec<String>>, // 模块路径，如 ["modules", "auth"]
 }
 
 struct HandlerInfo {
@@ -170,10 +170,10 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                     parse_handler_name(&call.args[1]),
                 ) {
                     // 获取当前状态
-                    let (current_base_path, current_module) = self.state_stack.last()
-                        .map(|(bp, m)| (bp.clone(), m.clone()))
-                        .unwrap_or((String::new(), None));
-                    
+                    let current_base_path = self.state_stack.last()
+                        .map(|(bp, _)| bp.clone())
+                        .unwrap_or_default();
+
                     // 构建完整路径
                     let full_path = if current_base_path.is_empty() {
                         path.to_string()
@@ -182,15 +182,15 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                     } else {
                         format!("{}/{}", current_base_path, path)
                     };
-                    
-                    //println!("DEBUG: Found route - path: {}, method: {}, handler: {}, module: {:?}", 
-                    //          full_path, method, handler, current_module);
-                    
+
+                    //println!("DEBUG: Found route - path: {}, method: {}, handler: {}, module: {:?}",
+                    //          full_path, method, handler, self.current_module);
+
                     self.routes.push(RouteInfo {
                         path: full_path,
                         method,
                         handler,
-                        module: current_module,
+                        module: if self.current_module.is_empty() { None } else { Some(self.current_module.clone()) },
                     });
                 }
             }
@@ -1000,23 +1000,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             handlers.insert(route.handler.clone(), handler);
         } else if let Some(module_name) = &route.module {
             // 如果主文件中没找到，尝试从模块文件中解析
-            let module_handler_path = base_path.join(format!("src/{}/handlers.rs", module_name));
-            
+            // 尝试多种文件模式
+            let module_path_str = module_name.join("/");
+            let module_file_paths = vec![
+                base_path.join(format!("src/{}_handler.rs", module_path_str)),  // modules/auth_handler.rs
+                base_path.join(format!("src/{}/handlers.rs", module_path_str)), // modules/auth/handlers.rs
+                base_path.join(format!("src/{}/handler.rs", module_path_str)), // modules/auth/handler.rs
+                base_path.join(format!("src/{}.rs", module_path_str)),         // modules/auth.rs
+            ];
+
+            let mut found_handler = false;
             if !module_handlers.contains_key(module_name) {
-                if module_handler_path.exists() {
-                    let module_content = fs::read_to_string(&module_handler_path)?;
-                    module_handlers.insert(module_name.clone(), module_content);
-                    println!("Found module handler file: {}", module_handler_path.display());
-                } else {
-                    eprintln!("Warning: Module handler file not found: {}", module_handler_path.display());
+                for module_handler_path in &module_file_paths {
+                    if module_handler_path.exists() {
+                        let module_content = fs::read_to_string(&module_handler_path)?;
+                        module_handlers.insert(module_name.clone(), module_content);
+                        println!("Found module handler file: {}", module_handler_path.display());
+                        found_handler = true;
+                        break;
+                    }
+                }
+
+                if !found_handler {
+                    eprintln!("Warning: Module handler file not found for '{}', tried paths: {:?}",
+                             module_path_str,
+                             module_file_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>());
                 }
             }
-            
+
             if let Some(module_content) = module_handlers.get(module_name) {
                 if let Some(handler) = parse_handler(module_content, &route.handler) {
                     handlers.insert(route.handler.clone(), handler);
                 } else {
-                    eprintln!("Warning: Handler '{}' not found in module '{}'", route.handler, module_name);
+                    eprintln!("Warning: Handler '{}' not found in module '{:?}'",
+                             route.handler, module_name);
                 }
             }
         } else {

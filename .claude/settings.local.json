@@ -6,7 +6,9 @@
       "Bash(python3:*)",
       "Bash(1 -- --base-dir tests/fixtures/simple_app --handler-file src/main.rs --model-files src/form.rs,src/response.rs,src/types.rs --output /tmp/debug.json)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(find:*)",
+      "Bash(./target/release/axum_doc:*)"
     ]
   }
 }
