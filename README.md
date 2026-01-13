@@ -186,6 +186,23 @@ Router::new()
     .nest("/api/v1", user::router())  // Path prefix automatically applied
 ```
 
+**⚠️ Anti-Pattern to Avoid:**
+
+Don't nest the same path prefix multiple times:
+
+```rust
+// In modules/mod.rs:
+Router::new().nest("/api/v1/user", user::router())
+
+// In modules/user/mod.rs (WRONG - causes /api/v1/user/api/v1/user/login):
+Router::new().nest("/api/v1/user", handler::router())
+
+// Correct approach - just return the handler router:
+pub fn router() -> Router {
+    handler::router()  // No double-nesting
+}
+```
+
 ### Merged Routes
 
 ```rust
@@ -218,11 +235,21 @@ async fn get_user(Path(id): Path<Uuid>) -> Json<User> {
 - Handlers must be standalone functions, not closures
 - Supported extractors: `Json`, `Query`, `Path`, `Form`
 - Handlers must have explicit type signatures
-- Nested module handler resolution may have limitations in complex projects
+- Be careful with path prefix duplication: avoid double-nesting the same path (e.g., `.nest("/api/v1", module_router())` in both parent and child modules)
 
 ## 🔄 Changelog
 
-### v0.2.0 (Latest)
+### v0.2.1 (Latest)
+- 🐛 Fixed module path resolution for nested directory structures
+- ✨ Added `current_module` tracking to distinguish sibling vs nested modules
+- ✨ Added `calculate_module_path()` helper for accurate module path computation
+- ✨ Added `extract_module_from_path()` helper to derive module context from file paths
+- ✨ Improved module file discovery in complex project structures
+- ✅ Properly handles nested modules (e.g., `modules/auth/handler.rs`)
+- 📝 Added detailed test analysis documentation
+- 🔧 Removed unused `module_stack` field (replaced by `current_module`)
+
+### v0.2.0
 - ✨ Added UUID, DateTime, Duration type support
 - ✨ Added usize/isize type support
 - ✨ Fixed Option<T> to use `nullable: true` instead of `"object"`
@@ -442,6 +469,23 @@ Router::new()
     .nest("/api/v1", user::router())  // 路径前缀自动应用
 ```
 
+**⚠️ 避免的反模式：**
+
+不要多次嵌套相同的路径前缀：
+
+```rust
+// 在 modules/mod.rs 中：
+Router::new().nest("/api/v1/user", user::router())
+
+// 在 modules/user/mod.rs 中（错误 - 会导致 /api/v1/user/api/v1/user/login）：
+Router::new().nest("/api/v1/user", handler::router())
+
+// 正确的方法 - 直接返回 handler 的 router：
+pub fn router() -> Router {
+    handler::router()  // 避免双重嵌套
+}
+```
+
 ### 合并路由
 
 ```rust
@@ -474,11 +518,21 @@ async fn get_user(Path(id): Path<Uuid>) -> Json<User> {
 - handler 必须是独立函数，不能是闭包
 - 支持的提取器：`Json`、`Query`、`Path`、`Form`
 - handler 必须有显式类型签名
-- 复杂项目中的嵌套模块 handler 解析可能存在限制
+- 注意路径前缀重复问题：避免在父模块和子模块中双重嵌套相同路径（例如，父模块和子模块中都使用 `.nest("/api/v1", module_router())`）
 
 ## 🔄 更新日志
 
-### v0.2.0 (最新版本)
+### v0.2.1 (最新版本)
+- 🐛 修复嵌套目录结构中的模块路径解析
+- ✨ 新增 `current_module` 跟踪以区分兄弟模块和嵌套模块
+- ✨ 新增 `calculate_module_path()` 辅助函数用于精确计算模块路径
+- ✨ 新增 `extract_module_from_path()` 辅助函数从文件路径推导模块上下文
+- ✨ 改进复杂项目结构中的模块文件发现
+- ✅ 正确处理嵌套模块（如 `modules/auth/handler.rs`）
+- 📝 新增详细的测试分析文档
+- 🔧 移除未使用的 `module_stack` 字段（由 `current_module` 替代）
+
+### v0.2.0
 - ✨ 新增 UUID、DateTime、Duration 类型支持
 - ✨ 新增 usize/isize 类型支持
 - ✨ 修复 Option<T> 使用 `nullable: true` 而非 `"object"`
