@@ -1,5 +1,7 @@
 // src/types.rs
 
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]

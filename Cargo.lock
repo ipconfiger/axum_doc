@@ -148,6 +148,7 @@ version = "0.2.1"
 dependencies = [
  "axum",
  "clap",
+ "once_cell",
  "quote",
  "regex",
  "serde",

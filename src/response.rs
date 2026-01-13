@@ -1,5 +1,7 @@
 // src/response.rs
 
+#![allow(dead_code)]
+
 use serde::Serialize;
 
 #[derive(Serialize)]

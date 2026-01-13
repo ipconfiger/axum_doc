@@ -1,9 +1,12 @@
+#![allow(dead_code)]
+
 use std::{fs, collections::HashMap, path::{Path as StdPath, PathBuf}};
 use syn::{parse_file, visit::Visit, FnArg, Pat, Type, Item, PathArguments, GenericArgument};
 use quote::ToTokens;
 use serde_json::{json, Value};
 use clap::Parser;
 use regex::Regex;
+use once_cell::sync::Lazy;
 
 // Add necessary imports for axum and model types
 use axum::{
@@ -18,6 +21,15 @@ mod types;
 use serde::{Deserialize, Serialize};
 use response::*;
 use types::*;
+
+// Precompiled regex for path parameter extraction
+static COLON_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#":([a-zA-Z0-9_]+)"#).unwrap()
+});
+
+static BRACE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"\{([a-zA-Z0-9_]+)\}"#).unwrap()
+});
 
 // Example model for demonstration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +98,63 @@ struct RouterVisitor {
     current_module: Vec<String>, // Track current file's module path (e.g., ["modules", "user"])
 }
 
+impl RouterVisitor {
+    /// Visits a module router file and extracts routes from it.
+    /// This is a shared method used by both nest and merge handlers.
+    ///
+    /// # Arguments
+    /// * `module_name` - The name of the module to visit
+    /// * `module_path_str` - The full module path as a string (e.g., "modules/user")
+    ///
+    /// # Returns
+    /// * `true` if the module file was found and visited successfully
+    /// * `false` if the module file was not found
+    fn visit_module_router(&mut self, module_name: &str, module_path_str: &str) -> bool {
+        // Try multiple file patterns for the module
+        let module_file_paths = vec![
+            self.base_path.join(format!("src/{}/handlers.rs", module_path_str)),
+            self.base_path.join(format!("src/{}/mod.rs", module_path_str)),
+            self.base_path.join(format!("src/{}.rs", module_path_str)),
+        ];
+
+        let mut found = false;
+        for module_file_path in &module_file_paths {
+            if module_file_path.exists() {
+                // Update current_module to reflect the nested module
+                let old_current_module = self.current_module.clone();
+                self.current_module = extract_module_from_path(&self.base_path, module_file_path);
+
+                if let Ok(module_content) = fs::read_to_string(module_file_path) {
+                    if let Ok(module_ast) = parse_file(&module_content) {
+                        for item in &module_ast.items {
+                            if let syn::Item::Fn(func) = item {
+                                if func.sig.ident == "router" {
+                                    if let Some(syn::Stmt::Expr(expr, _)) = func.block.stmts.last() {
+                                        self.visit_expr(expr);
+                                        found = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Restore current_module
+                self.current_module = old_current_module;
+                break;
+            }
+        }
+
+        if !found {
+            eprintln!("Warning: Module file not found for {}: {} (tried paths: {:?})",
+                     if module_name.contains("nest") { "nest" } else { "merge" },
+                     module_name, module_file_paths);
+        }
+
+        found
+    }
+}
+
 impl<'ast> Visit<'ast> for RouterVisitor {
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         // 先递归访问receiver（链式调用的左侧）
@@ -107,13 +176,11 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                     
                     // 构建完整路径
                     let full_path = if current_base_path.is_empty() {
-                        path
+                        path.to_string()
+                    } else if path.starts_with('/') {
+                        format!("{}{}", current_base_path, path)
                     } else {
-                        if path.starts_with('/') {
-                            format!("{}{}", current_base_path, path)
-                        } else {
-                            format!("{}/{}", current_base_path, path)
-                        }
+                        format!("{}/{}", current_base_path, path)
                     };
                     
                     //println!("DEBUG: Found route - path: {}, method: {}, handler: {}, module: {:?}", 
@@ -136,7 +203,7 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                     // 获取当前状态
                     let current_base_path = self.state_stack.last()
                         .map(|(bp, _)| bp.clone())
-                        .unwrap_or(String::new());
+                        .unwrap_or_default();
 
                     // 计算新的基础路径
                     let new_base_path = if current_base_path.is_empty() {
@@ -152,44 +219,8 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                     let module_path = calculate_module_path(&self.current_module, &module_name);
                     let module_path_str = module_path.join("/");
 
-                    // Try multiple file patterns for the module
-                    let module_file_paths = vec![
-                        self.base_path.join(format!("src/{}/handlers.rs", module_path_str)),
-                        self.base_path.join(format!("src/{}/mod.rs", module_path_str)),
-                        self.base_path.join(format!("src/{}.rs", module_path_str)),
-                    ];
-
-                    let mut found = false;
-                    for module_file_path in &module_file_paths {
-                        if module_file_path.exists() {
-                            // Update current_module to reflect the nested module
-                            let old_current_module = self.current_module.clone();
-                            self.current_module = extract_module_from_path(&self.base_path, module_file_path);
-
-                            if let Ok(module_content) = fs::read_to_string(module_file_path) {
-                                if let Ok(module_ast) = parse_file(&module_content) {
-                                    for item in &module_ast.items {
-                                        if let syn::Item::Fn(func) = item {
-                                            if func.sig.ident == "router" {
-                                                if let Some(syn::Stmt::Expr(expr, _)) = func.block.stmts.last() {
-                                                    self.visit_expr(expr);
-                                                    found = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Restore current_module
-                            self.current_module = old_current_module;
-                            break;
-                        }
-                    }
-
-                    if !found {
-                        eprintln!("Warning: Module file not found for nest: {} (tried paths: {:?})", module_name, module_file_paths);
-                    }
+                    // Visit the module router file using the shared method
+                    self.visit_module_router(&module_name, &module_path_str);
 
                     // 恢复状态
                     self.state_stack.pop();
@@ -213,44 +244,8 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                     let module_path = calculate_module_path(&self.current_module, &module_name);
                     let module_path_str = module_path.join("/");
 
-                    // Try multiple file patterns for the module
-                    let module_file_paths = vec![
-                        self.base_path.join(format!("src/{}/handlers.rs", module_path_str)),
-                        self.base_path.join(format!("src/{}/mod.rs", module_path_str)),
-                        self.base_path.join(format!("src/{}.rs", module_path_str)),
-                    ];
-
-                    let mut found = false;
-                    for module_file_path in &module_file_paths {
-                        if module_file_path.exists() {
-                            // Update current_module to reflect the merged module
-                            let old_current_module = self.current_module.clone();
-                            self.current_module = extract_module_from_path(&self.base_path, module_file_path);
-
-                            if let Ok(module_content) = fs::read_to_string(module_file_path) {
-                                if let Ok(module_ast) = parse_file(&module_content) {
-                                    for item in &module_ast.items {
-                                        if let syn::Item::Fn(func) = item {
-                                            if func.sig.ident == "router" {
-                                                if let Some(syn::Stmt::Expr(expr, _)) = func.block.stmts.last() {
-                                                    self.visit_expr(expr);
-                                                    found = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Restore current_module
-                            self.current_module = old_current_module;
-                            break;
-                        }
-                    }
-
-                    if !found {
-                        eprintln!("Warning: Module file not found for merge: {} (tried paths: {:?})", module_name, module_file_paths);
-                    }
+                    // Visit the module router file using the shared method
+                    self.visit_module_router(&module_name, &module_path_str);
 
                     // 恢复状态
                     self.state_stack.pop();
@@ -517,7 +512,13 @@ fn parse_extractor_type(ty: &Type) -> Option<(String, Type)> {
 }
 
 fn parse_models(file_content: &str) -> HashMap<String, StructInfo> {
-    let ast = parse_file(file_content).unwrap_or_else(|_| panic!("Failed to parse model file"));
+    let ast = match parse_file(file_content) {
+        Ok(ast) => ast,
+        Err(e) => {
+            eprintln!("Warning: Failed to parse model file: {}", e);
+            return HashMap::new();
+        }
+    };
     let mut structs = HashMap::new();
 
     for item in ast.items {
@@ -525,13 +526,23 @@ fn parse_models(file_content: &str) -> HashMap<String, StructInfo> {
             let mut fields = Vec::new();
             if let syn::Fields::Named(named) = item_struct.fields {
                 for field in named.named {
+                    let name = field.ident.as_ref()
+                        .expect("Named fields always have identifiers")
+                        .to_string();
+                    let ty_string = field.ty.to_token_stream().to_string();
+                    fields.push(FieldInfo { name, ty: ty_string });
+                }
+            } else if let syn::Fields::Unnamed(unnamed) = item_struct.fields {
+                // 处理元组结构体
+                for (index, field) in unnamed.unnamed.iter().enumerate() {
                     let ty_string = field.ty.to_token_stream().to_string();
                     fields.push(FieldInfo {
-                        name: field.ident.as_ref().unwrap().to_string(),
+                        name: format!("_{}", index),
                         ty: ty_string,
                     });
                 }
             }
+            // Unit structs (Fields::Unit) 忽略
 
             structs.insert(
                 item_struct.ident.to_string(),
@@ -622,11 +633,9 @@ fn get_type_name(ty: &Type) -> String {
 
             // 处理包装类型如 Json<User> -> User
             if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                if let Some(GenericArgument::Type(inner)) = args.args.first() {
-                    if let Type::Path(inner_path) = inner {
-                        if let Some(inner_segment) = inner_path.path.segments.last() {
-                            name = inner_segment.ident.to_string();
-                        }
+                if let Some(GenericArgument::Type(Type::Path(inner_path))) = args.args.first() {
+                    if let Some(inner_segment) = inner_path.path.segments.last() {
+                        name = inner_segment.ident.to_string();
                     }
                 }
             }
@@ -645,7 +654,7 @@ fn generate_openapi(
     let mut schemas = json!({});
 
     // 生成模型定义
-    for (_, info) in models {
+    for info in models.values() {
         let mut properties = json!({});
         for field in &info.fields {
             properties[&field.name] = rust_type_to_openapi(&field.ty, models);
@@ -668,14 +677,12 @@ fn generate_openapi(
             // 支持 /:id 和 /{id} 两种风格
             let mut param_names = vec![];
             // /:id
-            let colon_re = Regex::new(r#":([a-zA-Z0-9_]+)"#).unwrap();
-            for cap in colon_re.captures_iter(&route.path) {
+            for cap in COLON_RE.captures_iter(&route.path) {
                 let name = cap[1].to_string();
                 param_names.push(name);
             }
             // /{id}
-            let brace_re = Regex::new(r#"\{([a-zA-Z0-9_]+)\}"#).unwrap();
-            for cap in brace_re.captures_iter(&route.path) {
+            for cap in BRACE_RE.captures_iter(&route.path) {
                 let name = cap[1].to_string();
                 param_names.push(name);
             }
@@ -754,15 +761,16 @@ fn generate_openapi(
 
             // 添加到路径
             let path_key = &route.path;
-            
+
             // 确保路径存在
-            if !paths.as_object().unwrap().contains_key(path_key) {
+            if !paths.as_object().expect("paths should always be an object").contains_key(path_key) {
                 paths[path_key] = json!({});
             }
-            
-            let path_entry = paths[path_key]
+
+            let path_entry = paths.get_mut(path_key)
+                .expect("path entry should exist")
                 .as_object_mut()
-                .unwrap();
+                .expect("path entries should always be objects");
 
             // 构建操作对象
             // Use summary from doc comments if available, otherwise fallback to method + handler name
@@ -832,6 +840,7 @@ fn generate_openapi(
 }
 
 // Example handler functions for demonstration
+#[allow(dead_code)]
 /// 用户登录接口
 /// 
 /// 接收用户名和密码，返回用户资料信息
@@ -964,8 +973,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|file| base_path.join(file))
         .collect();
-    
-    let _app = app();
 
     // 1. 解析路由文件
     let router_content = fs::read_to_string(&handler_path)?;
