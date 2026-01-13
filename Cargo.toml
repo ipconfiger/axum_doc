@@ -1,6 +1,6 @@
 [package]
 name = "axum_doc"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Alex <your_email@example.com>"]
 description = "A CLI tool to generate OpenAPI 3.0 JSON from Axum Rust projects."

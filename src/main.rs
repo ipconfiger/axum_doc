@@ -83,7 +83,7 @@ struct RouterVisitor {
     routes: Vec<RouteInfo>,
     state_stack: Vec<(String, Option<String>)>, // (base_path, module_name)
     base_path: PathBuf, // 添加基础路径用于构建模块文件路径
-    module_stack: Vec<String>, // Track current module path for nested modules
+    current_module: Vec<String>, // Track current file's module path (e.g., ["modules", "user"])
 }
 
 impl<'ast> Visit<'ast> for RouterVisitor {
@@ -129,12 +129,10 @@ impl<'ast> Visit<'ast> for RouterVisitor {
             }
             "nest" => {
                 // 处理 .nest() 调用
-                if let (Some(base_path), Some(module_name)) = (
+                if let (Some(path_prefix), Some(module_name)) = (
                     parse_string_arg(&call.args[0]),
                     parse_nest_handler(&call.args[1]),
                 ) {
-                    //println!("DEBUG: Found nest - base_path: {}, module: {}", base_path, module_name);
-
                     // 获取当前状态
                     let current_base_path = self.state_stack.last()
                         .map(|(bp, _)| bp.clone())
@@ -142,37 +140,33 @@ impl<'ast> Visit<'ast> for RouterVisitor {
 
                     // 计算新的基础路径
                     let new_base_path = if current_base_path.is_empty() {
-                        base_path
+                        path_prefix.clone()
                     } else {
-                        format!("{}{}", current_base_path, base_path)
+                        format!("{}{}", current_base_path, path_prefix)
                     };
-
-                    //println!("DEBUG: Pushing state - base_path: {}, module: {}", new_base_path, module_name);
 
                     // 将新状态压入栈
                     self.state_stack.push((new_base_path, Some(module_name.clone())));
 
-                    // Push module onto module_stack for nested resolution
-                    self.module_stack.push(module_name.clone());
+                    // Calculate the full module path based on current_module
+                    let module_path = calculate_module_path(&self.current_module, &module_name);
+                    let module_path_str = module_path.join("/");
 
                     // Try multiple file patterns for the module
-                    // Build nested module path if we're in a nested context
-                    let module_path = if !self.module_stack.is_empty() {
-                        self.module_stack.join("/")
-                    } else {
-                        module_name.clone()
-                    };
-
                     let module_file_paths = vec![
-                        self.base_path.join(format!("src/{}/handlers.rs", module_path)),
-                        self.base_path.join(format!("src/{}/mod.rs", module_path)),
-                        self.base_path.join(format!("src/{}.rs", module_path)),
+                        self.base_path.join(format!("src/{}/handlers.rs", module_path_str)),
+                        self.base_path.join(format!("src/{}/mod.rs", module_path_str)),
+                        self.base_path.join(format!("src/{}.rs", module_path_str)),
                     ];
 
                     let mut found = false;
-                    for module_file_path in module_file_paths {
+                    for module_file_path in &module_file_paths {
                         if module_file_path.exists() {
-                            if let Ok(module_content) = fs::read_to_string(&module_file_path) {
+                            // Update current_module to reflect the nested module
+                            let old_current_module = self.current_module.clone();
+                            self.current_module = extract_module_from_path(&self.base_path, module_file_path);
+
+                            if let Ok(module_content) = fs::read_to_string(module_file_path) {
                                 if let Ok(module_ast) = parse_file(&module_content) {
                                     for item in &module_ast.items {
                                         if let syn::Item::Fn(func) = item {
@@ -186,15 +180,15 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                                     }
                                 }
                             }
+
+                            // Restore current_module
+                            self.current_module = old_current_module;
                             break;
                         }
                     }
 
-                    // Pop module from stack
-                    self.module_stack.pop();
-
                     if !found {
-                        eprintln!("Warning: Module file not found for nest: {}", module_name);
+                        eprintln!("Warning: Module file not found for nest: {} (tried paths: {:?})", module_name, module_file_paths);
                     }
 
                     // 恢复状态
@@ -215,27 +209,25 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                     // 将当前状态压入栈（merge 不改变前缀和模块）
                     self.state_stack.push((current_base_path.clone(), current_module));
 
-                    // Push module onto module_stack for nested resolution
-                    self.module_stack.push(module_name.clone());
+                    // Calculate the full module path based on current_module
+                    let module_path = calculate_module_path(&self.current_module, &module_name);
+                    let module_path_str = module_path.join("/");
 
                     // Try multiple file patterns for the module
-                    // Build nested module path if we're in a nested context
-                    let module_path = if !self.module_stack.is_empty() {
-                        self.module_stack.join("/")
-                    } else {
-                        module_name.clone()
-                    };
-
                     let module_file_paths = vec![
-                        self.base_path.join(format!("src/{}/handlers.rs", module_path)),
-                        self.base_path.join(format!("src/{}/mod.rs", module_path)),
-                        self.base_path.join(format!("src/{}.rs", module_path)),
+                        self.base_path.join(format!("src/{}/handlers.rs", module_path_str)),
+                        self.base_path.join(format!("src/{}/mod.rs", module_path_str)),
+                        self.base_path.join(format!("src/{}.rs", module_path_str)),
                     ];
 
                     let mut found = false;
-                    for module_file_path in module_file_paths {
+                    for module_file_path in &module_file_paths {
                         if module_file_path.exists() {
-                            if let Ok(module_content) = fs::read_to_string(&module_file_path) {
+                            // Update current_module to reflect the merged module
+                            let old_current_module = self.current_module.clone();
+                            self.current_module = extract_module_from_path(&self.base_path, module_file_path);
+
+                            if let Ok(module_content) = fs::read_to_string(module_file_path) {
                                 if let Ok(module_ast) = parse_file(&module_content) {
                                     for item in &module_ast.items {
                                         if let syn::Item::Fn(func) = item {
@@ -249,15 +241,15 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                                     }
                                 }
                             }
+
+                            // Restore current_module
+                            self.current_module = old_current_module;
                             break;
                         }
                     }
 
-                    // Pop module from stack
-                    self.module_stack.pop();
-
                     if !found {
-                        eprintln!("Warning: Module file not found for merge: {}", module_name);
+                        eprintln!("Warning: Module file not found for merge: {} (tried paths: {:?})", module_name, module_file_paths);
                     }
 
                     // 恢复状态
@@ -347,6 +339,43 @@ fn parse_merge_handler(expr: &syn::Expr) -> Option<String> {
     }
 
     None
+}
+
+/// Calculate the full module path for a referenced module.
+/// For example, if current_module is ["modules"] and we see "user::router()",
+/// this returns ["modules", "user"].
+fn calculate_module_path(current_module: &[String], module_name: &str) -> Vec<String> {
+    let mut path = current_module.to_vec();
+    path.push(module_name.to_string());
+    path
+}
+
+/// Extract module path from a file path.
+/// For example, "src/modules/user/mod.rs" returns ["modules", "user"].
+fn extract_module_from_path(base_path: &StdPath, file_path: &StdPath) -> Vec<String> {
+    // Get the path relative to src/
+    let path = file_path.strip_prefix(base_path).unwrap_or(file_path);
+    let path = path.strip_prefix("src").unwrap_or(path);
+
+    // Collect path components, excluding:
+    // - mod.rs, main.rs, lib.rs (module definition files)
+    // - .rs extension
+    let mut modules = Vec::new();
+    for component in path.components() {
+        if let std::path::Component::Normal(name) = component {
+            let name = name.to_string_lossy();
+            // Skip module definition files
+            if name != "mod.rs" && name != "main.rs" && name != "lib.rs" {
+                // Remove .rs extension if present
+                let module_name = name.trim_end_matches(".rs");
+                if !module_name.is_empty() {
+                    modules.push(module_name.to_string());
+                }
+            }
+        }
+    }
+
+    modules
 }
 
 fn parse_handler(file_content: &str, handler_name: &str) -> Option<HandlerInfo> {
@@ -942,11 +971,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router_content = fs::read_to_string(&handler_path)?;
     let router_ast = parse_file(&router_content)?;
 
+    // Initialize current_module based on handler path
+    let initial_module = extract_module_from_path(base_path, &handler_path);
+
     let mut visitor = RouterVisitor {
         routes: Vec::new(),
         state_stack: Vec::new(),
         base_path: base_path.to_path_buf(),
-        module_stack: Vec::new(),
+        current_module: initial_module,
     };
     visitor.visit_file(&router_ast);
 
