@@ -243,7 +243,7 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                     } else {
                         // 检查是否有部分重叠
                         let combined = format!("{}{}", current_base_path, path_prefix);
-                        let current_end = current_base_path.split('/').last().unwrap_or("");
+                        let current_end = current_base_path.split('/').next_back().unwrap_or("");
                         let new_start = path_prefix.trim_start_matches('/').split('/').next().unwrap_or("");
 
                         if current_end == new_start && !current_end.is_empty() && !new_start.is_empty() {
@@ -702,7 +702,7 @@ fn rust_type_to_openapi(ty: &str, models: &HashMap<String, StructInfo>) -> Value
                 // Provide helpful suggestions for common type errors
                 let clean_type_no_spaces = clean_ty.replace(" ", "");
                 let suggestion = if clean_type_no_spaces.starts_with("Json<") {
-                    format!("Note: Json<T> extractors are not fully supported yet. Consider defining the response type in --model-files")
+                    "Note: Json<T> extractors are not fully supported yet. Consider defining the response type in --model-files".to_string()
                 } else if clean_ty.contains("::") {
                     format!("Note: Type path '{}' may need to be added to model files", clean_ty)
                 } else {
@@ -1156,7 +1156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !module_handlers.contains_key(module_name) {
                 for module_handler_path in &module_file_paths {
                     if module_handler_path.exists() {
-                        let module_content = fs::read_to_string(&module_handler_path)?;
+                        let module_content = fs::read_to_string(module_handler_path)?;
                         module_handlers.insert(module_name.clone(), module_content);
                         println!("Found module handler file: {}", module_handler_path.display());
                         found_handler = true;
