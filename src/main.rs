@@ -557,11 +557,21 @@ fn parse_models(file_content: &str) -> HashMap<String, StructInfo> {
 }
 
 fn rust_type_to_openapi(ty: &str, models: &HashMap<String, StructInfo>) -> Value {
+    // Clean up reference types first
+    let clean_ty = ty.trim()
+        .trim_start_matches("&'static ")
+        .trim_start_matches("& 'static ")
+        .trim_start_matches("&'static")
+        .trim_start_matches("& ")
+        .trim_start_matches("&")
+        .trim_start_matches("mut ")
+        .trim();
+
     // Handle generics first (order matters - must check before simple types)
-    if let Some(inner_start) = ty.find('<') {
-        let outer_type = &ty[..inner_start];
-        let inner_end = ty.rfind('>').unwrap_or(ty.len());
-        let inner_type = &ty[inner_start + 1..inner_end];
+    if let Some(inner_start) = clean_ty.find('<') {
+        let outer_type = &clean_ty[..inner_start];
+        let inner_end = clean_ty.rfind('>').unwrap_or(clean_ty.len());
+        let inner_type = &clean_ty[inner_start + 1..inner_end];
 
         match outer_type {
             "Vec" | "std::vec::Vec" => {
@@ -590,7 +600,7 @@ fn rust_type_to_openapi(ty: &str, models: &HashMap<String, StructInfo>) -> Value
     }
 
     // Handle simple types
-    match ty {
+    match clean_ty {
         "String" | "&str" | "str" => json!({"type": "string"}),
         "i8" | "u8" | "i16" | "u16" | "i32" | "u32" => json!({"type": "integer", "format": "int32"}),
         "i64" | "u64" | "isize" | "usize" => json!({"type": "integer", "format": "int64"}),
@@ -616,10 +626,10 @@ fn rust_type_to_openapi(ty: &str, models: &HashMap<String, StructInfo>) -> Value
         }),
         // Custom types from models
         _ => {
-            if let Some(model) = models.get(ty) {
+            if let Some(model) = models.get(clean_ty) {
                 json!({"$ref": format!("#/components/schemas/{}", model.name)})
             } else {
-                eprintln!("Warning: Unknown type '{}', defaulting to object", ty);
+                eprintln!("Warning: Unknown type '{}', defaulting to object", clean_ty);
                 json!({"type": "object"})
             }
         }
