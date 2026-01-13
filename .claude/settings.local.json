@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(using-superpowers)",
+      "Bash(cargo:*)",
+      "Bash(python3:*)",
+      "Bash(1 -- --base-dir tests/fixtures/simple_app --handler-file src/main.rs --model-files src/form.rs,src/response.rs,src/types.rs --output /tmp/debug.json)",
+      "Bash(git add:*)"
+    ]
+  }
+}

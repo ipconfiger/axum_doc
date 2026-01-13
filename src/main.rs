@@ -12,13 +12,19 @@ use axum::{
     extract::Path as AxumPath,
 };
 
-mod form;
 mod response;
 mod types;
 
-use form::*;
+use serde::{Deserialize, Serialize};
 use response::*;
 use types::*;
+
+// Example model for demonstration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserLogin {
+    pub username: String,
+    pub password: String,
+}
 
 #[derive(Parser)]
 #[command(name = "axum_doc")]
@@ -47,13 +53,13 @@ struct RouteInfo {
     method: String,
     handler: String,
     module: Option<String>, // 模块名，用于分组
-    base_path: String,      // 基础路径，用于嵌套路由
 }
 
 struct HandlerInfo {
     params: Vec<Extractor>,
     return_type: Option<Type>,
-    description: Option<String>, // 添加描述字段
+    summary: Option<String>,    // Summary from first line of doc comments
+    description: Option<String>, // Description from remaining lines
 }
 
 struct Extractor {
@@ -77,6 +83,7 @@ struct RouterVisitor {
     routes: Vec<RouteInfo>,
     state_stack: Vec<(String, Option<String>)>, // (base_path, module_name)
     base_path: PathBuf, // 添加基础路径用于构建模块文件路径
+    module_stack: Vec<String>, // Track current module path for nested modules
 }
 
 impl<'ast> Visit<'ast> for RouterVisitor {
@@ -117,7 +124,6 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                         method,
                         handler,
                         module: current_module,
-                        base_path: current_base_path,
                     });
                 }
             }
@@ -128,46 +134,138 @@ impl<'ast> Visit<'ast> for RouterVisitor {
                     parse_nest_handler(&call.args[1]),
                 ) {
                     //println!("DEBUG: Found nest - base_path: {}, module: {}", base_path, module_name);
-                    
+
                     // 获取当前状态
                     let current_base_path = self.state_stack.last()
                         .map(|(bp, _)| bp.clone())
                         .unwrap_or(String::new());
-                    
+
                     // 计算新的基础路径
                     let new_base_path = if current_base_path.is_empty() {
                         base_path
                     } else {
                         format!("{}{}", current_base_path, base_path)
                     };
-                    
+
                     //println!("DEBUG: Pushing state - base_path: {}, module: {}", new_base_path, module_name);
-                    
+
                     // 将新状态压入栈
                     self.state_stack.push((new_base_path, Some(module_name.clone())));
-                    
-                    // 只递归 router 函数体
-                    let module_file_path = self.base_path.join(format!("src/{}/handlers.rs", module_name));
-                    if module_file_path.exists() {
-                        if let Ok(module_content) = fs::read_to_string(&module_file_path) {
-                            if let Ok(module_ast) = parse_file(&module_content) {
-                                for item in &module_ast.items {
-                                    if let syn::Item::Fn(func) = item {
-                                        if func.sig.ident == "router" {
-                                            if let Some(syn::Stmt::Expr(expr, _)) = func.block.stmts.last() {
-                                                self.visit_expr(expr);
+
+                    // Push module onto module_stack for nested resolution
+                    self.module_stack.push(module_name.clone());
+
+                    // Try multiple file patterns for the module
+                    // Build nested module path if we're in a nested context
+                    let module_path = if !self.module_stack.is_empty() {
+                        self.module_stack.join("/")
+                    } else {
+                        module_name.clone()
+                    };
+
+                    let module_file_paths = vec![
+                        self.base_path.join(format!("src/{}/handlers.rs", module_path)),
+                        self.base_path.join(format!("src/{}/mod.rs", module_path)),
+                        self.base_path.join(format!("src/{}.rs", module_path)),
+                    ];
+
+                    let mut found = false;
+                    for module_file_path in module_file_paths {
+                        if module_file_path.exists() {
+                            if let Ok(module_content) = fs::read_to_string(&module_file_path) {
+                                if let Ok(module_ast) = parse_file(&module_content) {
+                                    for item in &module_ast.items {
+                                        if let syn::Item::Fn(func) = item {
+                                            if func.sig.ident == "router" {
+                                                if let Some(syn::Stmt::Expr(expr, _)) = func.block.stmts.last() {
+                                                    self.visit_expr(expr);
+                                                    found = true;
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
+                            break;
                         }
-                    } else {
-                        eprintln!("Warning: Module file not found: {}", module_file_path.display());
                     }
-                    
+
+                    // Pop module from stack
+                    self.module_stack.pop();
+
+                    if !found {
+                        eprintln!("Warning: Module file not found for nest: {}", module_name);
+                    }
+
                     // 恢复状态
                     self.state_stack.pop();
+                }
+            }
+            "merge" => {
+                // 处理 .merge() 调用
+                // merge() 不添加路径前缀，只是合并另一个路由
+                if let Some(module_name) = parse_merge_handler(&call.args[0]) {
+                    //println!("DEBUG: Found merge - module: {}", module_name);
+
+                    // 获取当前状态（merge 不改变路径前缀）
+                    let (current_base_path, current_module) = self.state_stack.last()
+                        .map(|(bp, m)| (bp.clone(), m.clone()))
+                        .unwrap_or((String::new(), None));
+
+                    // 将当前状态压入栈（merge 不改变前缀和模块）
+                    self.state_stack.push((current_base_path.clone(), current_module));
+
+                    // Push module onto module_stack for nested resolution
+                    self.module_stack.push(module_name.clone());
+
+                    // Try multiple file patterns for the module
+                    // Build nested module path if we're in a nested context
+                    let module_path = if !self.module_stack.is_empty() {
+                        self.module_stack.join("/")
+                    } else {
+                        module_name.clone()
+                    };
+
+                    let module_file_paths = vec![
+                        self.base_path.join(format!("src/{}/handlers.rs", module_path)),
+                        self.base_path.join(format!("src/{}/mod.rs", module_path)),
+                        self.base_path.join(format!("src/{}.rs", module_path)),
+                    ];
+
+                    let mut found = false;
+                    for module_file_path in module_file_paths {
+                        if module_file_path.exists() {
+                            if let Ok(module_content) = fs::read_to_string(&module_file_path) {
+                                if let Ok(module_ast) = parse_file(&module_content) {
+                                    for item in &module_ast.items {
+                                        if let syn::Item::Fn(func) = item {
+                                            if func.sig.ident == "router" {
+                                                if let Some(syn::Stmt::Expr(expr, _)) = func.block.stmts.last() {
+                                                    self.visit_expr(expr);
+                                                    found = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+
+                    // Pop module from stack
+                    self.module_stack.pop();
+
+                    if !found {
+                        eprintln!("Warning: Module file not found for merge: {}", module_name);
+                    }
+
+                    // 恢复状态
+                    self.state_stack.pop();
+                } else {
+                    // 如果不是模块调用，则递归访问表达式
+                    // 这处理了内联的 router 表达式，如 merge(Router::new().route(...))
+                    syn::visit::visit_expr(self, &call.args[0]);
                 }
             }
             _ => {
@@ -219,14 +317,35 @@ fn parse_nest_handler(expr: &syn::Expr) -> Option<String> {
             }
         }
     }
-    
+
     // 尝试解析 nest("/path", module::handlers::router) 中的 module
     if let syn::Expr::Path(path) = expr {
         if let Some(segment) = path.path.segments.first() {
             return Some(segment.ident.to_string());
         }
     }
-    
+
+    None
+}
+
+fn parse_merge_handler(expr: &syn::Expr) -> Option<String> {
+    // Try to parse merge(module::handlers::router()) or merge(module::handlers::router)
+    if let syn::Expr::Call(call) = expr {
+        if let syn::Expr::Path(path) = &*call.func {
+            // Get the first segment as module name
+            if let Some(segment) = path.path.segments.first() {
+                return Some(segment.ident.to_string());
+            }
+        }
+    }
+
+    // Try to parse merge(module::handlers::router) without call
+    if let syn::Expr::Path(path) = expr {
+        if let Some(segment) = path.path.segments.first() {
+            return Some(segment.ident.to_string());
+        }
+    }
+
     None
 }
 
@@ -235,28 +354,38 @@ fn parse_handler(file_content: &str, handler_name: &str) -> Option<HandlerInfo> 
     let mut handler_info = HandlerInfo {
         params: Vec::new(),
         return_type: None,
+        summary: None,
         description: None,
     };
 
     for item in &ast.items {
         if let Item::Fn(func) = item {
             if func.sig.ident == handler_name {
-                // 提取文档注释
+                // Extract documentation comments
                 let mut doc_comments = Vec::new();
+
                 for attr in &func.attrs {
                     if attr.path().is_ident("doc") {
-                        // 将属性转换为字符串并解析
-                        let attr_str = attr.to_token_stream().to_string();
-                        //println!("DEBUG: Found doc attr: {}", attr_str);
-                        if attr_str.starts_with("#[doc = ") {
-                            // 提取引号内的内容
-                            if let Some(start) = attr_str.find('"') {
-                                if let Some(end) = attr_str.rfind('"') {
+                        // Handle Meta::NameValue (most common for /// comments)
+                        if let syn::Meta::NameValue(nv) = &attr.meta {
+                            if let syn::Expr::Lit(expr_lit) = &nv.value {
+                                if let syn::Lit::Str(lit_str) = &expr_lit.lit {
+                                    let content = lit_str.value().trim().to_string();
+                                    if !content.is_empty() {
+                                        doc_comments.push(content);
+                                    }
+                                }
+                            }
+                        }
+                        // Handle Meta::List (for #![doc = "..."] style)
+                        else if let syn::Meta::List(meta_list) = &attr.meta {
+                            let tokens = meta_list.tokens.to_string();
+                            if let Some(start) = tokens.find('"') {
+                                if let Some(end) = tokens.rfind('"') {
                                     if start < end {
-                                        let comment = &attr_str[start + 1..end];
-                                        if !comment.is_empty() {
-                                            doc_comments.push(comment.to_string());
-                                            //println!("DEBUG: Extracted comment: {}", comment);
+                                        let content = &tokens[start + 1..end];
+                                        if !content.is_empty() {
+                                            doc_comments.push(content.trim().to_string());
                                         }
                                     }
                                 }
@@ -264,11 +393,20 @@ fn parse_handler(file_content: &str, handler_name: &str) -> Option<HandlerInfo> 
                         }
                     }
                 }
-                
-                // 合并文档注释
+
+                // Split into summary (first line) and description (rest)
                 if !doc_comments.is_empty() {
-                    handler_info.description = Some(doc_comments.join("\n"));
-                    //println!("DEBUG: Final description: {}", handler_info.description.as_ref().unwrap());
+                    handler_info.summary = Some(doc_comments[0].clone());
+                    if doc_comments.len() > 1 {
+                        // Filter out empty lines for description
+                        let non_empty: Vec<String> = doc_comments[1..].iter()
+                            .filter(|s| !s.is_empty())
+                            .cloned()
+                            .collect();
+                        if !non_empty.is_empty() {
+                            handler_info.description = Some(non_empty.join("\n"));
+                        }
+                    }
                 }
 
                 // 提取参数
@@ -379,33 +517,70 @@ fn parse_models(file_content: &str) -> HashMap<String, StructInfo> {
 }
 
 fn rust_type_to_openapi(ty: &str, models: &HashMap<String, StructInfo>) -> Value {
+    // Handle generics first (order matters - must check before simple types)
+    if let Some(inner_start) = ty.find('<') {
+        let outer_type = &ty[..inner_start];
+        let inner_end = ty.rfind('>').unwrap_or(ty.len());
+        let inner_type = &ty[inner_start + 1..inner_end];
+
+        match outer_type {
+            "Vec" | "std::vec::Vec" => {
+                return json!({
+                    "type": "array",
+                    "items": rust_type_to_openapi(inner_type, models)
+                });
+            }
+            "Option" | "std::option::Option" => {
+                let mut inner_schema = rust_type_to_openapi(inner_type, models);
+                inner_schema["nullable"] = json!(true);
+                return inner_schema;
+            }
+            "HashMap" | "std::collections::HashMap" => {
+                let parts: Vec<&str> = inner_type.split(',').collect();
+                if parts.len() == 2 {
+                    let value_type = parts[1].trim();
+                    return json!({
+                        "type": "object",
+                        "additionalProperties": rust_type_to_openapi(value_type, models)
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Handle simple types
     match ty {
-        "String" | "&str" => json!({"type": "string"}),
-        "i32" | "u32" | "i16" | "u16" => json!({"type": "integer", "format": "int32"}),
-        "i64" | "u64" => json!({"type": "integer", "format": "int64"}),
+        "String" | "&str" | "str" => json!({"type": "string"}),
+        "i8" | "u8" | "i16" | "u16" | "i32" | "u32" => json!({"type": "integer", "format": "int32"}),
+        "i64" | "u64" | "isize" | "usize" => json!({"type": "integer", "format": "int64"}),
         "f32" => json!({"type": "number", "format": "float"}),
         "f64" => json!({"type": "number", "format": "double"}),
         "bool" => json!({"type": "boolean"}),
-        "Option" => json!({"type": "object"}), // 简化处理
-        "Vec" => json!({"type": "array", "items": {}}),
+        // UUID type (check for uuid::Uuid or just Uuid)
+        t if t.contains("Uuid") => json!({
+            "type": "string",
+            "format": "uuid",
+            "example": "550e8400-e29b-41d4-a716-446655440000"
+        }),
+        // DateTime types
+        t if t.contains("DateTime") || t.contains("chrono") => json!({
+            "type": "string",
+            "format": "date-time",
+            "example": "2024-01-01T00:00:00Z"
+        }),
+        // Duration
+        t if t.contains("Duration") || t.contains("duration") => json!({
+            "type": "string",
+            "format": "duration"
+        }),
+        // Custom types from models
         _ => {
             if let Some(model) = models.get(ty) {
                 json!({"$ref": format!("#/components/schemas/{}", model.name)})
             } else {
-                // 尝试处理泛型类型如 Vec<User>
-                if let Some(inner_start) = ty.find('<') {
-                    let inner_end = ty.rfind('>').unwrap_or(ty.len());
-                    let inner_type = &ty[inner_start+1..inner_end];
-                    if let Some(model) = models.get(inner_type) {
-                        return json!({
-                            "type": "array",
-                            "items": {
-                                "$ref": format!("#/components/schemas/{}", model.name)
-                            }
-                        });
-                    }
-                }
-                json!({"type": "object"}) // 默认对象类型
+                eprintln!("Warning: Unknown type '{}', defaulting to object", ty);
+                json!({"type": "object"})
             }
         }
     }
@@ -561,12 +736,17 @@ fn generate_openapi(
                 .unwrap();
 
             // 构建操作对象
+            // Use summary from doc comments if available, otherwise fallback to method + handler name
+            let summary = handler.summary.as_ref()
+                .cloned()
+                .unwrap_or_else(|| format!("{} {}", route.method.to_uppercase(), route.handler));
+
             let mut operation = json!({
-                "summary": format!("{} {}", route.method.to_uppercase(), route.handler),
+                "summary": summary,
                 "operationId": route.handler,
                 "responses": responses
             });
-            
+
             // 添加描述（如果存在）
             if let Some(description) = &handler.description {
                 operation["description"] = json!(description);
@@ -574,7 +754,7 @@ fn generate_openapi(
             
             // 合并路径参数和提取器参数，避免重复
             let mut all_parameters = parameters;
-            let mut existing_names: std::collections::HashSet<String> = all_parameters
+            let existing_names: std::collections::HashSet<String> = all_parameters
                 .iter()
                 .filter_map(|p| p.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
                 .collect();
@@ -762,10 +942,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router_content = fs::read_to_string(&handler_path)?;
     let router_ast = parse_file(&router_content)?;
 
-    let mut visitor = RouterVisitor { 
-        routes: Vec::new(), 
-        state_stack: Vec::new(), 
-        base_path: base_path.to_path_buf() 
+    let mut visitor = RouterVisitor {
+        routes: Vec::new(),
+        state_stack: Vec::new(),
+        base_path: base_path.to_path_buf(),
+        module_stack: Vec::new(),
     };
     visitor.visit_file(&router_ast);
 
@@ -834,4 +1015,406 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Found {} routes", visitor.routes.len());
     println!("Found {} models", all_models.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_rust_type_to_openapi_primitives() {
+        let models = HashMap::new();
+
+        // Test String
+        let schema = rust_type_to_openapi("String", &models);
+        assert_eq!(schema["type"], "string");
+
+        // Test i32
+        let schema = rust_type_to_openapi("i32", &models);
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["format"], "int32");
+
+        // Test i64
+        let schema = rust_type_to_openapi("i64", &models);
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["format"], "int64");
+
+        // Test f32
+        let schema = rust_type_to_openapi("f32", &models);
+        assert_eq!(schema["type"], "number");
+        assert_eq!(schema["format"], "float");
+
+        // Test f64
+        let schema = rust_type_to_openapi("f64", &models);
+        assert_eq!(schema["type"], "number");
+        assert_eq!(schema["format"], "double");
+
+        // Test bool
+        let schema = rust_type_to_openapi("bool", &models);
+        assert_eq!(schema["type"], "boolean");
+    }
+
+    #[test]
+    fn test_rust_type_to_openapi_uuid() {
+        let models = HashMap::new();
+        let schema = rust_type_to_openapi("Uuid", &models);
+        assert_eq!(schema["type"], "string");
+        assert_eq!(schema["format"], "uuid");
+        assert_eq!(schema["example"], "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_rust_type_to_openapi_datetime() {
+        let models = HashMap::new();
+        let schema = rust_type_to_openapi("DateTime", &models);
+        assert_eq!(schema["type"], "string");
+        assert_eq!(schema["format"], "date-time");
+        assert_eq!(schema["example"], "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn test_rust_type_to_openapi_duration() {
+        let models = HashMap::new();
+        let schema = rust_type_to_openapi("Duration", &models);
+        assert_eq!(schema["type"], "string");
+        assert_eq!(schema["format"], "duration");
+    }
+
+    #[test]
+    fn test_rust_type_to_openapi_vec() {
+        let models = HashMap::new();
+
+        // Test Vec<String>
+        let schema = rust_type_to_openapi("Vec<String>", &models);
+        assert_eq!(schema["type"], "array");
+        assert_eq!(schema["items"]["type"], "string");
+
+        // Test Vec<i32>
+        let schema = rust_type_to_openapi("Vec<i32>", &models);
+        assert_eq!(schema["type"], "array");
+        assert_eq!(schema["items"]["type"], "integer");
+        assert_eq!(schema["items"]["format"], "int32");
+    }
+
+    #[test]
+    fn test_rust_type_to_openapi_option() {
+        let models = HashMap::new();
+
+        // Test Option<String>
+        let schema = rust_type_to_openapi("Option<String>", &models);
+        assert_eq!(schema["type"], "string");
+        assert_eq!(schema["nullable"], true);
+
+        // Test Option<i64>
+        let schema = rust_type_to_openapi("Option<i64>", &models);
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["format"], "int64");
+        assert_eq!(schema["nullable"], true);
+    }
+
+    #[test]
+    fn test_rust_type_to_openapi_hashmap() {
+        let models = HashMap::new();
+
+        // Test HashMap<String, i32>
+        let schema = rust_type_to_openapi("HashMap<String, i32>", &models);
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["additionalProperties"]["type"], "integer");
+        assert_eq!(schema["additionalProperties"]["format"], "int32");
+    }
+
+    #[test]
+    fn test_rust_type_to_openapi_custom_type() {
+        let mut models = HashMap::new();
+        models.insert("User".to_string(), StructInfo {
+            name: "User".to_string(),
+            fields: vec![],
+        });
+
+        let schema = rust_type_to_openapi("User", &models);
+        assert_eq!(schema["$ref"], "#/components/schemas/User");
+    }
+
+    #[test]
+    fn test_parse_string_arg() {
+        // Test parsing string literal
+        let expr: syn::Expr = syn::parse_quote!("/api/v1/users");
+        let result = parse_string_arg(&expr);
+        assert_eq!(result, Some("/api/v1/users".to_string()));
+
+        // Test parsing non-string
+        let expr: syn::Expr = syn::parse_quote!(123);
+        let result = parse_string_arg(&expr);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_method() {
+        // Test parsing method call like post(handler)
+        let expr: syn::Expr = syn::parse_quote!(post(my_handler));
+        let result = parse_method(&expr);
+        assert_eq!(result, Some("post".to_string()));
+
+        // Test parsing get(handler)
+        let expr: syn::Expr = syn::parse_quote!(get(my_handler));
+        let result = parse_method(&expr);
+        assert_eq!(result, Some("get".to_string()));
+    }
+
+    #[test]
+    fn test_parse_handler_name() {
+        // Test parsing handler name from method call
+        let expr: syn::Expr = syn::parse_quote!(post(my_handler));
+        let result = parse_handler_name(&expr);
+        assert_eq!(result, Some("my_handler".to_string()));
+
+        // Test parsing nested path (only gets the final segment)
+        let expr: syn::Expr = syn::parse_quote!(post(module::handler));
+        let result = parse_handler_name(&expr);
+        assert_eq!(result, Some("handler".to_string()));
+    }
+
+    #[test]
+    fn test_parse_nest_handler() {
+        // Test parsing module::router() call
+        let expr: syn::Expr = syn::parse_quote!(module::handlers::router());
+        let result = parse_nest_handler(&expr);
+        assert_eq!(result, Some("module".to_string()));
+
+        // Test parsing simple path
+        let expr: syn::Expr = syn::parse_quote!(module::router);
+        let result = parse_nest_handler(&expr);
+        assert_eq!(result, Some("module".to_string()));
+    }
+
+    #[test]
+    fn test_parse_merge_handler() {
+        // Test parsing module::handlers::router() call
+        let expr: syn::Expr = syn::parse_quote!(module::handlers::router());
+        let result = parse_merge_handler(&expr);
+        assert_eq!(result, Some("module".to_string()));
+
+        // Test parsing simple path
+        let expr: syn::Expr = syn::parse_quote!(module::router);
+        let result = parse_merge_handler(&expr);
+        assert_eq!(result, Some("module".to_string()));
+    }
+
+    #[test]
+    fn test_extract_doc_comments_from_attrs() {
+        // This test verifies that doc comment extraction logic works
+        // We create attributes that syn would produce from /// comments
+
+        let code = r#"
+        /// User login endpoint
+        ///
+        /// This endpoint handles user authentication and returns a JWT token.
+        async fn test_handler() -> &'static str {
+            "ok"
+        }
+        "#;
+
+        let ast = parse_file(code).unwrap();
+        if let syn::Item::Fn(func) = &ast.items[0] {
+            let mut doc_comments = Vec::new();
+
+            for attr in &func.attrs {
+                if attr.path().is_ident("doc") {
+                    if let syn::Meta::NameValue(nv) = &attr.meta {
+                        if let syn::Expr::Lit(expr_lit) = &nv.value {
+                            if let syn::Lit::Str(lit_str) = &expr_lit.lit {
+                                let content = lit_str.value().trim().to_string();
+                                if !content.is_empty() {
+                                    doc_comments.push(content);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Blank lines are filtered out after trimming
+            assert_eq!(doc_comments.len(), 2);
+            assert_eq!(doc_comments[0], "User login endpoint");
+            assert_eq!(doc_comments[1], "This endpoint handles user authentication and returns a JWT token.");
+        }
+    }
+
+    #[test]
+    fn test_doc_comment_splitting() {
+        // Test splitting doc comments into summary and description
+
+        let code = r#"
+        /// Summary line
+        ///
+        /// Detailed description
+        /// Second line of description
+        async fn test_handler() -> &'static str {
+            "ok"
+        }
+        "#;
+
+        let ast = parse_file(code).unwrap();
+        if let syn::Item::Fn(func) = &ast.items[0] {
+            let mut doc_comments = Vec::new();
+
+            for attr in &func.attrs {
+                if attr.path().is_ident("doc") {
+                    if let syn::Meta::NameValue(nv) = &attr.meta {
+                        if let syn::Expr::Lit(expr_lit) = &nv.value {
+                            if let syn::Lit::Str(lit_str) = &expr_lit.lit {
+                                let content = lit_str.value().trim().to_string();
+                                if !content.is_empty() {
+                                    doc_comments.push(content);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Simulate the splitting logic
+            let summary = if !doc_comments.is_empty() {
+                Some(doc_comments[0].clone())
+            } else {
+                None
+            };
+
+            let description = if doc_comments.len() > 1 {
+                // Filter out empty lines and join
+                let non_empty: Vec<String> = doc_comments[1..].iter()
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+                    .collect();
+                if non_empty.is_empty() {
+                    None
+                } else {
+                    Some(non_empty.join("\n"))
+                }
+            } else {
+                None
+            };
+
+            assert_eq!(summary, Some("Summary line".to_string()));
+            assert_eq!(description, Some("Detailed description\nSecond line of description".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_nested_generic_types() {
+        let models = HashMap::new();
+
+        // Test Vec<Vec<String>>
+        let schema = rust_type_to_openapi("Vec<Vec<String>>", &models);
+        assert_eq!(schema["type"], "array");
+        assert_eq!(schema["items"]["type"], "array");
+        assert_eq!(schema["items"]["items"]["type"], "string");
+
+        // Test Option<Vec<i32>>
+        let schema = rust_type_to_openapi("Option<Vec<i32>>", &models);
+        assert_eq!(schema["type"], "array");
+        assert_eq!(schema["nullable"], true);
+        assert_eq!(schema["items"]["type"], "integer");
+    }
+
+    #[test]
+    fn test_unknown_type_fallback() {
+        let models = HashMap::new();
+
+        // Test unknown type falls back to object
+        let schema = rust_type_to_openapi("UnknownType", &models);
+        assert_eq!(schema["type"], "object");
+    }
+
+    #[test]
+    fn test_usize_isize_types() {
+        let models = HashMap::new();
+
+        // Test usize
+        let schema = rust_type_to_openapi("usize", &models);
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["format"], "int64");
+
+        // Test isize
+        let schema = rust_type_to_openapi("isize", &models);
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["format"], "int64");
+    }
+
+    #[test]
+    fn test_and_str_type() {
+        let models = HashMap::new();
+
+        // Test &str
+        let schema = rust_type_to_openapi("&str", &models);
+        assert_eq!(schema["type"], "string");
+    }
+
+    #[test]
+    fn test_complex_hashmap() {
+        let models = HashMap::new();
+
+        // Test HashMap<String, Vec<i32>>
+        let schema = rust_type_to_openapi("HashMap<String, Vec<i32>>", &models);
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["additionalProperties"]["type"], "array");
+        assert_eq!(schema["additionalProperties"]["items"]["type"], "integer");
+    }
+
+    #[test]
+    fn test_module_handler_parsing() {
+        // Test that we can extract module name from various patterns
+
+        // Pattern 1: module::handlers::router()
+        let expr: syn::Expr = syn::parse_quote!(api::handlers::router());
+        let result = parse_merge_handler(&expr);
+        assert_eq!(result, Some("api".to_string()));
+
+        // Pattern 2: auth::router
+        let expr: syn::Expr = syn::parse_quote!(auth::router);
+        let result = parse_merge_handler(&expr);
+        assert_eq!(result, Some("auth".to_string()));
+
+        // Pattern 3: single module
+        let expr: syn::Expr = syn::parse_quote!(users::router());
+        let result = parse_nest_handler(&expr);
+        assert_eq!(result, Some("users".to_string()));
+    }
+
+    #[test]
+    fn test_single_doc_comment() {
+        // Test handler with only summary, no description
+
+        let code = r#"
+        /// Single line comment
+        async fn test_handler() -> &'static str {
+            "ok"
+        }
+        "#;
+
+        let ast = parse_file(code).unwrap();
+        if let syn::Item::Fn(func) = &ast.items[0] {
+            let mut doc_comments = Vec::new();
+
+            for attr in &func.attrs {
+                if attr.path().is_ident("doc") {
+                    if let syn::Meta::NameValue(nv) = &attr.meta {
+                        if let syn::Expr::Lit(expr_lit) = &nv.value {
+                            if let syn::Lit::Str(lit_str) = &expr_lit.lit {
+                                let content = lit_str.value().trim().to_string();
+                                if !content.is_empty() {
+                                    doc_comments.push(content);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            assert_eq!(doc_comments.len(), 1);
+            // Doc comments are now trimmed
+            assert_eq!(doc_comments[0], "Single line comment");
+        }
+    }
 }
