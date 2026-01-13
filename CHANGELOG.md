@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2025-01-13
+
+### Fixed
+- 🐛 Fixed modular project handler discovery (P0-1) - Enhanced file pattern matching
+- 🐛 Fixed reference type mapping (P0-2) - `&'static str`, `&str`, `&String` now correctly mapped
+- 🐛 Enhanced error messages with helpful context and suggestions (P1-1)
+
+### Added
+- ✨ Support for multiple module handler file patterns:
+  - `{module}_handler.rs`
+  - `{module}/handlers.rs`
+  - `{module}/handler.rs`
+  - `{module}.rs`
+- ✨ Reference type cleaning for accurate type mapping
+- ✨ 8 new unit tests for better coverage (P1-4):
+  - Reference type mapping tests (4)
+  - Path parameter extraction tests (5)
+  - Schema generation tests (2)
+
+### Changed
+- 🔧 Refactored 193-line `generate_openapi` function into 6 focused helpers (P1-2):
+  - `generate_schemas()` - Generate model schemas
+  - `extract_path_params()` - Extract path parameters
+  - `process_handler_params()` - Process handler extractors
+  - `generate_response()` - Generate response schemas
+  - `build_operation()` - Build operation objects
+  - `generate_openapi()` - Orchestrate generation
+- 🔧 Improved code organization and maintainability
+- 🔧 Better error messages with actionable guidance
+
+### Test Coverage
+- Total tests: 45 (30 unit + 15 integration)
+- Increase: +21.6% from 37 to 45 tests
+- All tests passing ✅
+
 ## [Unreleased]
 
 ### Planned
