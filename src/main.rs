@@ -669,15 +669,10 @@ fn get_type_name(ty: &Type) -> String {
     ty.to_token_stream().to_string()
 }
 
-fn generate_openapi(
-    routes: &[RouteInfo],
-    handlers: &HashMap<String, HandlerInfo>,
-    models: &HashMap<String, StructInfo>,
-) -> Value {
-    let mut paths = json!({});
+/// Generate OpenAPI schema definitions from models
+fn generate_schemas(models: &HashMap<String, StructInfo>) -> Value {
     let mut schemas = json!({});
 
-    // 生成模型定义
     for info in models.values() {
         let mut properties = json!({});
         for field in &info.fields {
@@ -689,78 +684,61 @@ fn generate_openapi(
         });
     }
 
-    // 生成路径定义
-    for route in routes {
-        println!("check route: {}", route.path);
-        if let Some(handler) = handlers.get(&route.handler) {
-            let mut parameters = vec![];
-            let mut request_body = None;
+    schemas
+}
 
-            // 自动补充路径参数
-            let mut path_params = vec![];
-            // 支持 /:id 和 /{id} 两种风格
-            let mut param_names = vec![];
-            // /:id
-            for cap in COLON_RE.captures_iter(&route.path) {
-                let name = cap[1].to_string();
-                param_names.push(name);
-            }
-            // /{id}
-            for cap in BRACE_RE.captures_iter(&route.path) {
-                let name = cap[1].to_string();
-                param_names.push(name);
-            }
-            for name in param_names {
-                path_params.push(json!({
-                    "name": name,
-                    "in": "path",
-                    "required": true,
-                    "schema": { "type": "string" }
-                }));
-            }
+/// Extract path parameters from route path (supports both :id and {id} styles)
+fn extract_path_params(route_path: &str) -> Vec<Value> {
+    let mut path_params = vec![];
+    let mut param_names = vec![];
 
-            // 处理参数
-            for extractor in &handler.params {
-                let type_name = get_type_name(&extractor.inner_type);
+    // Support both /:id and /{id} styles
+    for cap in COLON_RE.captures_iter(route_path) {
+        param_names.push(cap[1].to_string());
+    }
+    for cap in BRACE_RE.captures_iter(route_path) {
+        param_names.push(cap[1].to_string());
+    }
 
-                if let Some(struct_info) = models.get(&type_name) {
-                    match extractor.kind.as_str() {
-                        "Path" | "Query" => {
-                            for field in &struct_info.fields {
-                                let required = !field.ty.starts_with("Option");
+    for name in param_names {
+        path_params.push(json!({
+            "name": name,
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+        }));
+    }
 
-                                parameters.push(json!({
-                                    "name": field.name,
-                                    "in": extractor.kind.to_lowercase(),
-                                    "required": required,
-                                    "schema": rust_type_to_openapi(&field.ty, models)
-                                }));
-                            }
-                        }
-                        "Json" | "Form" => {
-                            request_body = Some(json!({
-                                "content": {
-                                    "application/json": {
-                                        "schema": {
-                                            "$ref": format!("#/components/schemas/{}", type_name)
-                                        }
-                                    }
-                                }
-                            }));
-                        }
-                        _ => {}
+    path_params
+}
+
+/// Process handler extractor parameters (Path, Query, Json, Form)
+fn process_handler_params(
+    handler: &HandlerInfo,
+    models: &HashMap<String, StructInfo>,
+) -> (Vec<Value>, Option<Value>) {
+    let mut parameters = vec![];
+    let mut request_body = None;
+
+    for extractor in &handler.params {
+        let type_name = get_type_name(&extractor.inner_type);
+
+        if let Some(struct_info) = models.get(&type_name) {
+            match extractor.kind.as_str() {
+                "Path" | "Query" => {
+                    for field in &struct_info.fields {
+                        let required = !field.ty.starts_with("Option");
+
+                        parameters.push(json!({
+                            "name": field.name,
+                            "in": extractor.kind.to_lowercase(),
+                            "required": required,
+                            "schema": rust_type_to_openapi(&field.ty, models)
+                        }));
                     }
                 }
-            }
-
-            // 处理响应
-            let mut responses = json!({});
-            if let Some(return_type) = &handler.return_type {
-                let type_name = get_type_name(return_type);
-
-                if models.contains_key(&type_name) {
-                    responses["200"] = json!({
-                        "description": "Successful response",
+                "Json" | "Form" => {
+                    request_body = Some(json!({
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -768,25 +746,140 @@ fn generate_openapi(
                                 }
                             }
                         }
-                    });
-                } else {
-                    // 处理基础类型或未定义类型
-                    let type_str = return_type.to_token_stream().to_string();
-                    responses["200"] = json!({
-                        "description": "Successful response",
-                        "content": {
-                            "application/json": {
-                                "schema": rust_type_to_openapi(&type_str, models)
-                            }
-                        }
-                    });
+                    }));
                 }
+                _ => {}
             }
+        }
+    }
 
-            // 添加到路径
+    (parameters, request_body)
+}
+
+/// Generate response schema from handler return type
+fn generate_response(
+    handler: &HandlerInfo,
+    models: &HashMap<String, StructInfo>,
+) -> Value {
+    let mut responses = json!({});
+
+    if let Some(return_type) = &handler.return_type {
+        let type_name = get_type_name(return_type);
+
+        if models.contains_key(&type_name) {
+            responses["200"] = json!({
+                "description": "Successful response",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": format!("#/components/schemas/{}", type_name)
+                        }
+                    }
+                }
+            });
+        } else {
+            // Handle basic types or undefined types
+            let type_str = return_type.to_token_stream().to_string();
+            responses["200"] = json!({
+                "description": "Successful response",
+                "content": {
+                    "application/json": {
+                        "schema": rust_type_to_openapi(&type_str, models)
+                    }
+                }
+            });
+        }
+    }
+
+    responses
+}
+
+/// Build OpenAPI operation object for a route
+fn build_operation(
+    route: &RouteInfo,
+    handler: &HandlerInfo,
+    models: &HashMap<String, StructInfo>,
+) -> Value {
+    // Extract path parameters automatically
+    let path_params = extract_path_params(&route.path);
+
+    // Process handler parameters
+    let (mut parameters, request_body) = process_handler_params(handler, models);
+
+    // Generate response
+    let responses = generate_response(handler, models);
+
+    // Merge path params and extractor params, avoiding duplicates
+    let existing_names: std::collections::HashSet<String> = parameters
+        .iter()
+        .filter_map(|p| p.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+        .collect();
+
+    for p in path_params {
+        if let Some(name) = p.get("name").and_then(|n| n.as_str()) {
+            if !existing_names.contains(name) {
+                parameters.push(p);
+            }
+        }
+    }
+
+    // Use summary from doc comments if available
+    let summary = handler.summary.as_ref()
+        .cloned()
+        .unwrap_or_else(|| format!("{} {}", route.method.to_uppercase(), route.handler));
+
+    // Build operation object
+    let mut operation = json!({
+        "summary": summary,
+        "operationId": route.handler,
+        "responses": responses
+    });
+
+    // Add description if exists
+    if let Some(description) = &handler.description {
+        operation["description"] = json!(description);
+    }
+
+    // Add parameters if not empty
+    if !parameters.is_empty() {
+        operation["parameters"] = json!(parameters);
+    }
+
+    // Add request body if exists
+    if let Some(rb) = request_body {
+        operation["requestBody"] = rb;
+    }
+
+    // Add tags for grouping
+    if let Some(module_name) = &route.module {
+        operation["tags"] = json!([module_name]);
+    }
+
+    operation
+}
+
+fn generate_openapi(
+    routes: &[RouteInfo],
+    handlers: &HashMap<String, HandlerInfo>,
+    models: &HashMap<String, StructInfo>,
+) -> Value {
+    let mut paths = json!({});
+
+    // Generate schema definitions
+    let schemas = generate_schemas(models);
+
+    // Generate path definitions for each route
+    for route in routes {
+        println!("check route: {}", route.path);
+
+        if let Some(handler) = handlers.get(&route.handler) {
+            // Build operation for this route
+            let operation = build_operation(route, handler, models);
+
+            // Add to paths object
             let path_key = &route.path;
 
-            // 确保路径存在
+            // Ensure path exists
             if !paths.as_object().expect("paths should always be an object").contains_key(path_key) {
                 paths[path_key] = json!({});
             }
@@ -796,55 +889,11 @@ fn generate_openapi(
                 .as_object_mut()
                 .expect("path entries should always be objects");
 
-            // 构建操作对象
-            // Use summary from doc comments if available, otherwise fallback to method + handler name
-            let summary = handler.summary.as_ref()
-                .cloned()
-                .unwrap_or_else(|| format!("{} {}", route.method.to_uppercase(), route.handler));
-
-            let mut operation = json!({
-                "summary": summary,
-                "operationId": route.handler,
-                "responses": responses
-            });
-
-            // 添加描述（如果存在）
-            if let Some(description) = &handler.description {
-                operation["description"] = json!(description);
-            }
-            
-            // 合并路径参数和提取器参数，避免重复
-            let mut all_parameters = parameters;
-            let existing_names: std::collections::HashSet<String> = all_parameters
-                .iter()
-                .filter_map(|p| p.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
-                .collect();
-            for p in path_params {
-                if let Some(name) = p.get("name").and_then(|n| n.as_str()) {
-                    if !existing_names.contains(name) {
-                        all_parameters.push(p);
-                    }
-                }
-            }
-            if !all_parameters.is_empty() {
-                operation["parameters"] = json!(all_parameters);
-            }
-            
-            // 只有当requestBody不为空时才添加requestBody字段
-            if let Some(rb) = request_body {
-                operation["requestBody"] = rb;
-            }
-            
-            // 添加tags用于分组
-            if let Some(module_name) = &route.module {
-                operation["tags"] = json!([module_name]);
-            }
-
             path_entry.insert(
                 route.method.to_lowercase(),
                 operation,
             );
-        }else{
+        } else {
             println!("router:{} not found handler:{}", route.path, route.handler);
         }
     }
