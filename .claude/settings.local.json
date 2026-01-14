@@ -8,7 +8,16 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(find:*)",
-      "Bash(./target/release/axum_doc:*)"
+      "Bash(./target/release/axum_doc:*)",
+      "Bash(grep:*)",
+      "Bash(git checkout:*)",
+      "Bash(unset CARGO_REGISTRIES_CRATES_IO_PROTOCOL)",
+      "Bash(CARGO_REGISTRIES_CRATES_IO_PROTOCOL=gitch cargo publish:*)",
+      "Bash(CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git cargo publish:*)",
+      "Bash(curl:*)",
+      "Bash(/Users/alex/Projects/workspace/axum_doc/target/release/axum_doc:*)",
+      "Bash(/Users/alex/Projects/workspace/axum_doc/target/debug/axum_doc:*)",
+      "Skill(superpowers:verification-before-completion)"
     ]
   }
 }
